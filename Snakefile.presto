@@ -1,0 +1,177 @@
+# Example pRESTO pipeline for Roche 454 data with sample multiplexing
+# Data from Jiang, He and Weinstein et al, 2013, Sci Trans Med.
+#
+# Author:  Jason Anthony Vander Heiden
+# Date:    2016.03.04
+#
+# Snakefile: Simon Frost
+# Date: 2016.09.30
+# Data obtained by:
+# esearch -db sra -query SRX190717 | efetch --format runinfo | cut -d ',' -f 1 | grep SRR | xargs fastq-dump
+# Define run parameters and input files
+
+import re
+
+IDS, = glob_wildcards("{id,[A-Z]{3}[0-9]+}.fastq")
+
+def getmid(wildcards):
+  return [re.search("[A-Z]{3}[0-9]+",x).group(0)+"_MIDs.fasta" for x in wildcards]
+
+FWD_PRIMERS="./SRX190717_VPrimers.fasta"
+REV_PRIMERS="./SRX190717_CPrimers.fasta"
+
+# Set global parameters
+MIN_LENGTH=300
+MIN_QUAL=20
+MID_MAXERROR=0.1
+FWD_MAXERROR=0.3
+FWD_MAXLEN=50
+REV_MAXERROR=0.3
+REV_MAXLEN=50
+MAX_MISSING=20
+DUPCOUNT=2
+
+rule all:
+  input:
+    expand("{id}_length-pass_quality-pass-MID_primers-pass-FWD_primers-pass-REV_primers-pass-expand_reheader-rename_reheader_collapse-unique_atleast-{dup}.fastq",id=IDS,dup=DUPCOUNT)
+
+# Remove short reads
+rule remove_short_reads:
+  input:
+    "{d1}.fastq"
+  params:
+    prefix = "{d1}"
+  output:
+    temp("{d1}_length-pass.fastq")
+  message:
+    "FilterSeq length {input}"
+  log:
+    "logs/{d1}.length.log"
+  threads:
+    4
+  shell:
+    "FilterSeq.py length -s {input} -n {MIN_LENGTH} --outname {params.prefix} --outdir . --log {log} --nproc {threads}"
+
+# Remove low quality reads
+rule remove_low_quality_reads:
+  input:
+    "{d1}.fastq"
+  params:
+    prefix = "{d1}"
+  output:
+    temp("{d1}_quality-pass.fastq")
+  message:
+    "FilterSeq length {input}"
+  log:
+    "logs/{d1}.quality.log"
+  threads:
+    4
+  shell:
+    "FilterSeq.py quality -s {input} -q {MIN_QUAL} --outname {params.prefix} --outdir . --log {log} --nproc {threads}"
+
+# Mask MIDs
+rule mask_mid:
+  input:
+    ["{d1}.fastq",getmid]
+  params:
+    prefix = "{d1}-MID"
+  output:
+    temp("{d1}-MID_primers-pass.fastq")
+  message:
+    "MaskPrimers score mid {input}"
+  log:
+    "logs/{d1}.mid.log"
+  threads:
+    4
+  shell:
+    "MaskPrimers.py score -s {input[0]} -p {input[1]} --start 0 --maxerror {MID_MAXERROR} --mode cut --outname {params.prefix} --log {log} --nproc {threads}"
+
+# Mask forward primers
+rule mask_fwd:
+  input:
+    "{d1}.fastq"
+  params:
+    prefix = "{d1}-FWD"
+  output:
+    temp("{d1}-FWD_primers-pass.fastq")
+  message:
+    "MaskPrimers align fwd {input}"
+  log:
+    "logs/{d1}.fwd.log"
+  threads:
+    4
+  shell:
+    "MaskPrimers.py align -s {input} -p {FWD_PRIMERS} --maxlen {FWD_MAXLEN} --maxerror {FWD_MAXERROR} --mode mask --outname {params.prefix} --log {log} --nproc {threads}"
+
+# Mask reverse primers
+rule mask_rev:
+  input:
+    "{d1}.fastq"
+  params:
+    prefix = "{d1}-REV"
+  output:
+    temp("{d1}-REV_primers-pass.fastq")
+  message:
+    "MaskPrimers align rev {input}"
+  log:
+    "logs/{d1}.rev.log"
+  threads:
+    4
+  shell:
+    "MaskPrimers.py align -s {input} -p {REV_PRIMERS} --maxlen {REV_MAXLEN} --maxerror {REV_MAXERROR} --revpr --skiprc --mode cut --outname {params.prefix} --log {log} --nproc {threads}"
+
+# Expand headers
+rule expand_headers:
+  input:
+    "{d1}.fastq"
+  params:
+    prefix = "{d1}-expand"
+  output:
+    temp("{d1}-expand_reheader.fastq")
+  message:
+    "ParseHeaders expand {input}"
+  shell:
+    "ParseHeaders.py expand -s {input} -f PRIMER --outname {params.prefix}"
+
+# Rename headers
+rule rename_headers:
+  input:
+    "{d1}.fastq"
+  params:
+    prefix = "{d1}-rename"
+  output:
+    temp("{d1}-rename_reheader.fastq")
+  message:
+    "ParseHeaders rename {input}"
+  shell:
+    "ParseHeaders.py rename -s {input} -f PRIMER1 PRIMER2 PRIMER3 -k MID VPRIMER CPRIMER --outname {params.prefix}"
+
+# Collapse sequences
+rule collapse_sequences:
+  input:
+    "{d1}.fastq"
+  params:
+    prefix = "{d1}"
+  output:
+    temp("{d1}_collapse-unique.fastq")
+  message:
+    "CollapseSeq {input}"
+  log:
+    "logs/{d1}.collapse.log"
+  shell:
+    "CollapseSeq.py -s {input} -n {MAX_MISSING} --inner --uf MID CPRIMER --cf VPRIMER --act set --outname {params.prefix}"
+
+# Split sequences by count
+rule split_sequences:
+  input:
+    "{d1}.fastq"
+  params:
+    prefix = "{d1}"
+  output:
+    ["{d1}_atleast-{DUPCOUNT}.fastq","{d1}_under-{DUPCOUNT}.fastq"]
+  message:
+    "SplitSeq group {input}"
+  log:
+    "logs/{d1}.split.log"
+  shell:
+    "SplitSeq.py group -s {input} -f DUPCOUNT --num {DUPCOUNT} --outname {params.prefix}"

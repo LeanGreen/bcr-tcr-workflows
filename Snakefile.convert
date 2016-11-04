@@ -1,0 +1,93 @@
+import subprocess
+from snakemake.utils import R
+
+IGBLAST_VERSION = subprocess.check_output("igblastn -version", shell=True)
+
+IDS,=glob_wildcards("{id,[A-Z]{3}[0-9]+}.fasta")
+
+rule all:
+  input:
+    expand(["{id}_db-pass_FUNCTIONAL-T_clone-pass.tab",
+           "{id}_mindist.pdf"],id=IDS)
+
+MINDIST=0.15
+
+# Dont change below
+
+rule convert:
+  input:
+    "{d1}.fastq"
+  output:
+    temp("{d1}.fasta")
+  run:
+    from Bio import SeqIO
+    SeqIO.convert(input[0],'fastq',output[0],'fasta')
+
+rule igblast:
+  input:
+    "{d1}.fasta"
+  output:
+    "{d1}.fmt7"
+  version:
+    IGBLAST_VERSION
+  message:
+    "Running IgBLAST on {input}"
+  threads:
+    4
+  shell:
+    "igblastn \
+    -germline_db_V database/human_igh_v \
+    -germline_db_D database/human_igh_d \
+    -germline_db_J database/human_igh_j \
+    -auxiliary_data optional_file/human_gl.aux \
+    -domain_system imgt -ig_seqtype Ig -organism human \
+    -outfmt '7 std qseq sseq btop' \
+    -query {input} \
+    -out {output} \
+    -num_threads {threads}"
+
+rule makedb:
+  input:
+    ["{d1}.fmt7","{d1}.fasta"]
+  output:
+    "{d1}_db-pass.tab"
+  shell:
+    "MakeDb.py igblast -i {input[0]} -s {input[1]} -r IMGT_Human_IGH[VDJ].fasta \
+    --regions --scores"
+
+rule define_clones:
+  input:
+    "{d1}.tab"
+  output:
+    "{d1}_clone-pass.tab"
+  shell:
+    "DefineClones.py bygroup -d {input} --act set --model ham \
+--sym min --norm len --dist {MINDIST}"
+
+rule filter_functional:
+  input:
+    "{d1}.tab"
+  output:
+    ["{d1}_FUNCTIONAL-T.tab","{d1}_FUNCTIONAL-T.tab"]
+  shell:
+    "ParseDb.py split -d {input} -f FUNCTIONAL"
+
+rule distplot:
+  input:
+    "{d1}_db-pass.tab"
+  output:
+    "{d1}_mindist.pdf"
+  run:
+    R("""
+    library(ggplot2)
+    library(alakazam)
+    library(shazam)
+    db <- readChangeoDb("{input}")
+    db <- distToNearest(db, model="ham", symmetry="min")
+    p1 <- ggplot() + theme_bw() + 
+    ggtitle("Distance to nearest: ham") + xlab("distance") +
+    geom_histogram(data=db, aes(x=DIST_NEAREST), binwidth=0.01, 
+                   fill="steelblue", color="white")
+    ggsave("{output}",p1,width=7,height=7)
+    """)
+
